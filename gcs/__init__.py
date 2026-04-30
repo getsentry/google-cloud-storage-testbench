@@ -12,4 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from gcs import bucket, object, project, rewrite, upload
+from gcs import bucket, multipart_upload, object, project, rewrite, upload
