@@ -17,6 +17,7 @@ import datetime
 import json
 import logging
 import time
+import urllib.parse
 
 import flask
 from google.protobuf import json_format
@@ -34,6 +35,7 @@ db = testbench.database.Database.init()
 retry_test = testbench.common.gen_retry_test_decorator(db)
 grpc_port = 0
 grpc_service = None
+_XML_MULTIPART_MAX_PARTS = 10000
 
 
 # === DEFAULT ENTRY FOR REST SERVER === #
@@ -75,6 +77,9 @@ def xml_put_object(bucket_name, object_name):
 
 
 def xml_get_object(bucket_name, object_name):
+    upload_id = flask.request.args.get("uploadId")
+    if upload_id is not None:
+        return xml_list_parts(bucket_name, object_name, upload_id)
     fake_request = testbench.common.FakeRequest.init_xml(flask.request)
     blob = db.get_object(
         bucket_name,
@@ -92,6 +97,171 @@ def xml_get_object(bucket_name, object_name):
     return response
 
 
+# === S3-COMPATIBLE XML MULTIPART UPLOAD HANDLERS === #
+
+
+def xml_initiate_multipart_upload(bucket_name, object_name):
+    db.insert_test_bucket()
+    bucket = db.get_bucket(bucket_name, None).metadata
+    upload = gcs_type.multipart_upload.init_xml_multipart(
+        flask.request, bucket, object_name
+    )
+    db.insert_upload(upload)
+    body = gcs_type.multipart_upload.build_initiate_response_xml(
+        bucket_name, object_name, upload.upload_id
+    )
+    return flask.Response(body, status=200, content_type="application/xml")
+
+
+def xml_upload_part(bucket_name, object_name, upload_id, part_number):
+    upload = db.get_upload(upload_id, None)
+    if getattr(upload, "kind", None) != "xml_multipart":
+        testbench.error.notfound("Upload %s" % upload_id, None)
+    _validate_xml_multipart_target(upload, bucket_name, object_name)
+    try:
+        parsed_part_number = int(part_number)
+    except (TypeError, ValueError):
+        testbench.error.invalid("partNumber", None)
+    if parsed_part_number < 1 or parsed_part_number > _XML_MULTIPART_MAX_PARTS:
+        testbench.error.invalid("partNumber", None)
+    data = testbench.common.extract_media(flask.request)
+    etag = gcs_type.multipart_upload.compute_part_etag(data)
+    upload.parts[parsed_part_number] = {
+        "etag": etag,
+        "data": data,
+        "last_modified": datetime.datetime.now(datetime.timezone.utc),
+    }
+    response = flask.make_response("")
+    response.headers["ETag"] = etag
+    return response
+
+
+def xml_list_parts(bucket_name, object_name, upload_id):
+    upload = db.get_upload(upload_id, None)
+    if getattr(upload, "kind", None) != "xml_multipart":
+        testbench.error.notfound("Upload %s" % upload_id, None)
+    _validate_xml_multipart_target(upload, bucket_name, object_name)
+    max_parts = min(int(flask.request.args.get("max-parts", 1000)), 1000)
+    marker = int(flask.request.args.get("part-number-marker", 0))
+    sorted_nums = sorted(n for n in upload.parts if n > marker)
+    page = sorted_nums[:max_parts]
+    is_truncated = len(sorted_nums) > max_parts
+    next_marker = page[-1] if is_truncated and page else None
+    rows = [
+        (
+            n,
+            upload.parts[n]["last_modified"],
+            upload.parts[n]["etag"],
+            len(upload.parts[n]["data"]),
+        )
+        for n in page
+    ]
+    body = gcs_type.multipart_upload.build_list_parts_response_xml(
+        bucket_name,
+        object_name,
+        upload_id,
+        rows,
+        marker,
+        next_marker,
+        max_parts,
+        is_truncated,
+    )
+    return flask.Response(body, status=200, content_type="application/xml")
+
+
+def _validate_xml_multipart_target(upload, bucket_name, object_name):
+    if upload.bucket.bucket_id != bucket_name or upload.metadata["name"] != object_name:
+        testbench.error.notfound("Upload %s" % upload.upload_id, None)
+
+
+def _xml_object_location(bucket_name, object_name):
+    quoted_object_name = urllib.parse.quote(object_name)
+    if flask.request.host.split(".", 1)[0] == bucket_name:
+        return flask.request.host_url + quoted_object_name
+    return (
+        flask.request.host_url
+        + urllib.parse.quote(bucket_name)
+        + "/"
+        + quoted_object_name
+    )
+
+
+def xml_complete_multipart_upload(bucket_name, object_name, upload_id):
+    upload = db.get_upload(upload_id, None)
+    if getattr(upload, "kind", None) != "xml_multipart":
+        testbench.error.notfound("Upload %s" % upload_id, None)
+    _validate_xml_multipart_target(upload, bucket_name, object_name)
+    requested = gcs_type.multipart_upload.parse_complete_request_xml(
+        testbench.common.extract_media(flask.request)
+    )
+    blob, multipart_etag = gcs_type.multipart_upload.finalize_multipart(
+        upload, requested
+    )
+    db.insert_object(
+        bucket_name,
+        blob,
+        context=None,
+        preconditions=getattr(upload, "preconditions", []),
+    )
+    db.delete_upload(upload_id, None)
+    location = _xml_object_location(bucket_name, object_name)
+    body = gcs_type.multipart_upload.build_complete_response_xml(
+        location, bucket_name, object_name, multipart_etag
+    )
+    response = flask.Response(body, status=200, content_type="application/xml")
+    response.headers["ETag"] = multipart_etag
+    return response
+
+
+def xml_abort_multipart_upload(bucket_name, object_name, upload_id):
+    upload = db.get_upload(upload_id, None)
+    if getattr(upload, "kind", None) != "xml_multipart":
+        testbench.error.notfound("Upload %s" % upload_id, None)
+    _validate_xml_multipart_target(upload, bucket_name, object_name)
+    db.delete_upload(upload_id, None)
+    return flask.make_response("", 204)
+
+
+def _xml_post_dispatcher(bucket_name, object_name):
+    """Dispatch POST on /<bucket>/<object> to the right handler."""
+    if "uploads" in flask.request.args:
+        return xml_initiate_multipart_upload(bucket_name, object_name)
+    upload_id = flask.request.args.get("uploadId")
+    if upload_id is not None:
+        return xml_complete_multipart_upload(bucket_name, object_name, upload_id)
+    testbench.error.generic("Not implemented", 501, None, None)
+
+
+def _xml_delete_dispatcher(bucket_name, object_name):
+    """Dispatch DELETE on /<bucket>/<object> to abort or delete object."""
+    upload_id = flask.request.args.get("uploadId")
+    if upload_id is not None:
+        return xml_abort_multipart_upload(bucket_name, object_name, upload_id)
+    return xml_delete_object(bucket_name, object_name)
+
+
+def xml_delete_object(bucket_name, object_name):
+    db.delete_object(
+        bucket_name,
+        object_name,
+        generation=int(flask.request.args.get("generation", 0)),
+        preconditions=testbench.common.make_xml_preconditions(flask.request),
+        context=None,
+    )
+    return flask.Response(status=204)
+
+
+def _xml_put_dispatcher(bucket_name, object_name):
+    """Dispatch PUT on /<bucket>/<object> to simple upload or UploadPart."""
+    upload_id = flask.request.args.get("uploadId")
+    part_number = flask.request.args.get("partNumber")
+    if upload_id is not None and part_number is not None:
+        return xml_upload_part(bucket_name, object_name, upload_id, part_number)
+    if upload_id is not None or part_number is not None:
+        testbench.error.invalid("multipart upload query parameters", None)
+    return xml_put_object(bucket_name, object_name)
+
+
 @root.route("/<path:object_name>", subdomain="<bucket_name>")
 @retry_test(method="storage.objects.get")
 def root_get_object(bucket_name, object_name):
@@ -107,21 +277,37 @@ def root_get_object_with_bucket(bucket_name, object_name):
 @root.route("/<path:object_name>", subdomain="<bucket_name>", methods=["PUT"])
 @retry_test(method="storage.objects.insert")
 def root_put_object(bucket_name, object_name):
-    return xml_put_object(bucket_name, object_name)
+    return _xml_put_dispatcher(bucket_name, object_name)
 
 
 @root.route("/<bucket_name>/<path:object_name>", methods=["POST"])
 @retry_test(method="storage.objects.insert")
 def root_create_resumable_object(bucket_name, object_name):
-    # TODO: add resumable XML API support. Only needed to cause failures
-    # using RetryTestAPI.
-    testbench.error.generic("Not implemented", 501, None, None)
+    return _xml_post_dispatcher(bucket_name, object_name)
+
+
+@root.route("/<path:object_name>", subdomain="<bucket_name>", methods=["POST"])
+@retry_test(method="storage.objects.insert")
+def root_create_resumable_object_subdomain(bucket_name, object_name):
+    return _xml_post_dispatcher(bucket_name, object_name)
 
 
 @root.route("/<bucket_name>/<path:object_name>", subdomain="", methods=["PUT"])
 @retry_test(method="storage.objects.insert")
 def root_put_object_with_bucket(bucket_name, object_name):
-    return xml_put_object(bucket_name, object_name)
+    return _xml_put_dispatcher(bucket_name, object_name)
+
+
+@root.route("/<bucket_name>/<path:object_name>", subdomain="", methods=["DELETE"])
+@retry_test(method="storage.objects.delete")
+def root_delete_object_with_bucket(bucket_name, object_name):
+    return _xml_delete_dispatcher(bucket_name, object_name)
+
+
+@root.route("/<path:object_name>", subdomain="<bucket_name>", methods=["DELETE"])
+@retry_test(method="storage.objects.delete")
+def root_delete_object(bucket_name, object_name):
+    return _xml_delete_dispatcher(bucket_name, object_name)
 
 
 @root.route("/retry_tests", methods=["GET"])
