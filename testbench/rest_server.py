@@ -233,11 +233,22 @@ def _xml_post_dispatcher(bucket_name, object_name):
 
 
 def _xml_delete_dispatcher(bucket_name, object_name):
-    """Dispatch DELETE on /<bucket>/<object> to abort or 501."""
+    """Dispatch DELETE on /<bucket>/<object> to abort or delete object."""
     upload_id = flask.request.args.get("uploadId")
     if upload_id is not None:
         return xml_abort_multipart_upload(bucket_name, object_name, upload_id)
-    testbench.error.generic("Not implemented", 501, None, None)
+    return xml_delete_object(bucket_name, object_name)
+
+
+def xml_delete_object(bucket_name, object_name):
+    db.delete_object(
+        bucket_name,
+        object_name,
+        generation=int(flask.request.args.get("generation", 0)),
+        preconditions=testbench.common.make_xml_preconditions(flask.request),
+        context=None,
+    )
+    return flask.Response(status=204)
 
 
 def _xml_put_dispatcher(bucket_name, object_name):

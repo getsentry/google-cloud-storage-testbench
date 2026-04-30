@@ -246,6 +246,18 @@ class TestXmlMultipartUpload(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 404, msg=response.data)
 
+    def test_delete_object_without_upload_id(self):
+        bucket = _create_bucket(self.client)
+        self.client.put("/%s/deleteme.txt" % bucket, data=b"hello")
+        response = self.client.get("/%s/deleteme.txt" % bucket)
+        self.assertEqual(response.status_code, 200)
+
+        response = self.client.delete("/%s/deleteme.txt" % bucket)
+        self.assertEqual(response.status_code, 204)
+
+        response = self.client.get("/%s/deleteme.txt" % bucket)
+        self.assertEqual(response.status_code, 404)
+
     def test_upload_part_rejects_invalid_part_numbers(self):
         bucket = _create_bucket(self.client)
         upload_id, _ = _initiate(self.client, bucket, "invalid-part.bin")
