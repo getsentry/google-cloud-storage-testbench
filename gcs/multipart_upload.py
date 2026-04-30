@@ -218,9 +218,7 @@ def validate_min_part_size(requested_parts, upload):
             break
         part = upload.parts.get(part_number)
         if part is None:
-            testbench.error.invalid(
-                "Part %d not uploaded" % part_number, context=None
-            )
+            testbench.error.invalid("Part %d not uploaded" % part_number, context=None)
         if len(part["data"]) < MIN_PART_SIZE:
             testbench.error.generic(
                 "EntityTooSmall: Part %d is %d bytes, minimum is %d"
@@ -236,9 +234,7 @@ def validate_requested_parts(requested_parts, upload):
     for part_number, requested_etag in requested_parts:
         part = upload.parts.get(part_number)
         if part is None:
-            testbench.error.invalid(
-                "Part %d not uploaded" % part_number, context=None
-            )
+            testbench.error.invalid("Part %d not uploaded" % part_number, context=None)
         actual_etag = part["etag"]
         if requested_etag != actual_etag:
             testbench.error.generic(

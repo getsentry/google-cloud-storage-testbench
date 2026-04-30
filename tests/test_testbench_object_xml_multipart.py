@@ -169,9 +169,7 @@ class TestXmlMultipartUpload(unittest.TestCase):
         part1 = b"x" * (5 * 1024 * 1024)
         part2 = b"y" * 42
 
-        upload_id, _ = _initiate(
-            self.client, bucket, "sub.txt", base_url=base_url
-        )
+        upload_id, _ = _initiate(self.client, bucket, "sub.txt", base_url=base_url)
         etag1 = _upload_part(
             self.client, bucket, "sub.txt", upload_id, 1, part1, base_url=base_url
         )
@@ -418,9 +416,7 @@ class TestXmlMultipartUpload(unittest.TestCase):
             self.client, bucket, "source.bin", upload_id, 1, b"x" * (5 * 1024 * 1024)
         )
 
-        response = _complete(
-            self.client, bucket, "other.bin", upload_id, [(1, etag)]
-        )
+        response = _complete(self.client, bucket, "other.bin", upload_id, [(1, etag)])
         self.assertEqual(response.status_code, 404, msg=response.data)
 
         response = self.client.get("/%s/source.bin" % bucket)

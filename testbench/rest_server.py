@@ -157,7 +157,14 @@ def xml_list_parts(bucket_name, object_name, upload_id):
         for n in page
     ]
     body = gcs_type.multipart_upload.build_list_parts_response_xml(
-        bucket_name, object_name, upload_id, rows, marker, next_marker, max_parts, is_truncated
+        bucket_name,
+        object_name,
+        upload_id,
+        rows,
+        marker,
+        next_marker,
+        max_parts,
+        is_truncated,
     )
     return flask.Response(body, status=200, content_type="application/xml")
 
