@@ -60,6 +60,8 @@ def init_xml_multipart(request, bucket, object_name):
         metadata["cacheControl"] = headers["cache-control"]
     if headers.get("x-goog-storage-class"):
         metadata["storageClass"] = headers["x-goog-storage-class"]
+    if headers.get("x-goog-custom-time"):
+        metadata["customTime"] = headers["x-goog-custom-time"]
 
     # Collect x-goog-meta-* custom metadata
     custom = metadata["metadata"]
