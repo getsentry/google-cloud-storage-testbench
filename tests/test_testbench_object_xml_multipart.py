@@ -200,6 +200,94 @@ class TestXmlMultipartUpload(unittest.TestCase):
     # ------------------------------------------------------------------
     # 3. Abort
     # ------------------------------------------------------------------
+    def test_complete_is_idempotent(self):
+        bucket = _create_bucket(self.client)
+        part = b"hello-complete-retry"
+        upload_id, _ = _initiate(self.client, bucket, "retry-complete.bin")
+        etag = _upload_part(
+            self.client, bucket, "retry-complete.bin", upload_id, 1, part
+        )
+
+        first = _complete(
+            self.client,
+            bucket,
+            "retry-complete.bin",
+            upload_id,
+            [(1, etag)],
+        )
+        self.assertEqual(first.status_code, 200, msg=first.data)
+        first_root = ET.fromstring(first.data)
+        first_etag = first_root.findtext(_ns("ETag"))
+        self.assertEqual(first.headers.get("ETag"), first_etag)
+
+        second = _complete(
+            self.client,
+            bucket,
+            "retry-complete.bin",
+            upload_id,
+            [(1, etag)],
+        )
+        self.assertEqual(second.status_code, 200, msg=second.data)
+        second_root = ET.fromstring(second.data)
+        self.assertEqual(second_root.findtext(_ns("ETag")), first_etag)
+        self.assertEqual(second.headers.get("ETag"), first_etag)
+
+        response = self.client.get("/%s/retry-complete.bin" % bucket)
+        self.assertEqual(response.status_code, 200, msg=response.data)
+        self.assertEqual(response.data, part)
+
+    def test_abort_is_idempotent(self):
+        bucket = _create_bucket(self.client)
+        upload_id, _ = _initiate(self.client, bucket, "retry-abort.txt")
+        _upload_part(self.client, bucket, "retry-abort.txt", upload_id, 1, b"data")
+
+        first = self.client.delete(
+            "/%s/retry-abort.txt" % bucket,
+            query_string={"uploadId": upload_id},
+        )
+        self.assertEqual(first.status_code, 204)
+
+        second = self.client.delete(
+            "/%s/retry-abort.txt" % bucket,
+            query_string={"uploadId": upload_id},
+        )
+        self.assertEqual(second.status_code, 204)
+
+        # Upload part after abort should still 404
+        response = self.client.put(
+            "/%s/retry-abort.txt" % bucket,
+            query_string={"uploadId": upload_id, "partNumber": "2"},
+            data=b"more",
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_abort_after_complete_returns_204(self):
+        bucket = _create_bucket(self.client)
+        part = b"completed-then-aborted"
+        upload_id, _ = _initiate(self.client, bucket, "abort-after-complete.bin")
+        etag = _upload_part(
+            self.client, bucket, "abort-after-complete.bin", upload_id, 1, part
+        )
+        complete = _complete(
+            self.client,
+            bucket,
+            "abort-after-complete.bin",
+            upload_id,
+            [(1, etag)],
+        )
+        self.assertEqual(complete.status_code, 200, msg=complete.data)
+
+        response = self.client.delete(
+            "/%s/abort-after-complete.bin" % bucket,
+            query_string={"uploadId": upload_id},
+        )
+        self.assertEqual(response.status_code, 204)
+
+        # Object remains after aborting a completed upload.
+        response = self.client.get("/%s/abort-after-complete.bin" % bucket)
+        self.assertEqual(response.status_code, 200, msg=response.data)
+        self.assertEqual(response.data, part)
+
     def test_abort(self):
         bucket = _create_bucket(self.client)
         upload_id, _ = _initiate(self.client, bucket, "abort.txt")
