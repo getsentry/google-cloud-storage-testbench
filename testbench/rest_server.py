@@ -118,6 +118,8 @@ def xml_upload_part(bucket_name, object_name, upload_id, part_number):
     if getattr(upload, "kind", None) != "xml_multipart":
         testbench.error.notfound("Upload %s" % upload_id, None)
     _validate_xml_multipart_target(upload, bucket_name, object_name)
+    if getattr(upload, "aborted", False) or getattr(upload, "complete", False):
+        testbench.error.notfound("Upload %s" % upload_id, None)
     try:
         parsed_part_number = int(part_number)
     except (TypeError, ValueError):
@@ -141,6 +143,8 @@ def xml_list_parts(bucket_name, object_name, upload_id):
     if getattr(upload, "kind", None) != "xml_multipart":
         testbench.error.notfound("Upload %s" % upload_id, None)
     _validate_xml_multipart_target(upload, bucket_name, object_name)
+    if getattr(upload, "aborted", False) or getattr(upload, "complete", False):
+        testbench.error.notfound("Upload %s" % upload_id, None)
     max_parts = min(int(flask.request.args.get("max-parts", 1000)), 1000)
     marker = int(flask.request.args.get("part-number-marker", 0))
     sorted_nums = sorted(n for n in upload.parts if n > marker)
@@ -191,6 +195,22 @@ def xml_complete_multipart_upload(bucket_name, object_name, upload_id):
     if getattr(upload, "kind", None) != "xml_multipart":
         testbench.error.notfound("Upload %s" % upload_id, None)
     _validate_xml_multipart_target(upload, bucket_name, object_name)
+    if getattr(upload, "aborted", False):
+        testbench.error.notfound("Upload %s" % upload_id, None)
+    location = _xml_object_location(bucket_name, object_name)
+
+    # GCS returns 200 when complete is retried after a successful completion
+    # (e.g. response lost). Keep the session around marked complete so retries
+    # can reproduce the original success response instead of 404.
+    if getattr(upload, "complete", False):
+        multipart_etag = upload.multipart_etag
+        body = gcs_type.multipart_upload.build_complete_response_xml(
+            location, bucket_name, object_name, multipart_etag
+        )
+        response = flask.Response(body, status=200, content_type="application/xml")
+        response.headers["ETag"] = multipart_etag
+        return response
+
     requested = gcs_type.multipart_upload.parse_complete_request_xml(
         testbench.common.extract_media(flask.request)
     )
@@ -203,8 +223,9 @@ def xml_complete_multipart_upload(bucket_name, object_name, upload_id):
         context=None,
         preconditions=getattr(upload, "preconditions", []),
     )
-    db.delete_upload(upload_id, None)
-    location = _xml_object_location(bucket_name, object_name)
+    upload.complete = True
+    upload.multipart_etag = multipart_etag
+    upload.parts = {}
     body = gcs_type.multipart_upload.build_complete_response_xml(
         location, bucket_name, object_name, multipart_etag
     )
@@ -218,7 +239,16 @@ def xml_abort_multipart_upload(bucket_name, object_name, upload_id):
     if getattr(upload, "kind", None) != "xml_multipart":
         testbench.error.notfound("Upload %s" % upload_id, None)
     _validate_xml_multipart_target(upload, bucket_name, object_name)
-    db.delete_upload(upload_id, None)
+
+    # GCS returns 204 when abort is retried after a successful abort (e.g.
+    # response lost), and also when aborting a recently completed upload.
+    # Keep the session around marked aborted so retries stay successful
+    # instead of 404.
+    if getattr(upload, "aborted", False) or getattr(upload, "complete", False):
+        return flask.make_response("", 204)
+
+    upload.aborted = True
+    upload.parts = {}
     return flask.make_response("", 204)
 
 
