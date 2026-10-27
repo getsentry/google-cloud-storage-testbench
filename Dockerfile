@@ -16,6 +16,12 @@ FROM python:3.12@sha256:9e615ab2a4e8c67f9638fa93002ac364647c2c2c1b66925ef3f8832f
 EXPOSE 9000
 WORKDIR /opt/storage-testbench
 
+# The base image's ca-certificates and libbrotli predate the eMudhra root
+# removal and the CVE-2026-111497 fix.
+RUN apt-get update \
+    && apt-get install -y --only-upgrade ca-certificates libbrotli1 libbrotli-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY . /opt/storage-testbench/
 
 RUN python3 -m pip install -e .
